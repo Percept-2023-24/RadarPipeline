@@ -28,6 +28,7 @@ class RadarBlock
 
         uint* inputframeptr;
         float* inputbufferptr;
+	float* inputangbufferptr;
 
         uint lastframe;
 
@@ -54,6 +55,11 @@ class RadarBlock
         void setBufferPointer(float* ptr)
         {
             inputbufferptr = ptr;
+        }
+
+	void setAngleBufferPointer(float* ptr)
+        {
+            inputangbufferptr = ptr;
         }
 
         // Sets the input frame pointer
@@ -208,6 +214,10 @@ class Visualizer : public RadarBlock
                 cv::putText(borderedImage, "n", textPosition_n, fontFace, fontScale, cv::Scalar(169, 169, 169), thickness);
                 cv::putText(borderedImage, "g", textPosition_g, fontFace, fontScale, cv::Scalar(169, 169, 169), thickness);
                 cv::putText(borderedImage, "e", textPosition_e, fontFace, fontScale, cv::Scalar(169, 169, 169), thickness);
+	        //cv::Point textPosition_ang(borderLeft - 200, (borderedImage.rows-60+4*(textSize.height+24))/2);
+	        //cv::putText(borderedImage, "F", textPosition_ang, fontFace, fontScale, cv::Scalar(169, 169, 169), thickness);
+		cv::Point textPosition_angtxt(borderLeft + 650, (borderedImage.rows-60+2*(textSize.height+20))/2);
+		cv::putText(borderedImage, "Est. Angle: ", textPosition_angtxt, cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(169, 169, 169), 2);
 
                 for (int i = origin.x; i <= borderedImage.cols - borderRight; i += stepSizeX) {
                     std::ostringstream stream;
@@ -229,6 +239,15 @@ class Visualizer : public RadarBlock
             int half_offset = 0;
             if(true)
                 half_offset = height/2;
+
+	    cv::Size textSize = cv::getTextSize("-           Velocity           +", cv::FONT_HERSHEY_SIMPLEX, 1.0, 4, 0);
+	    cv::Point textPosition_ang(borderLeft + 650, (borderedImage.rows-60+4*(textSize.height+24))/2);
+	    cv::line(borderedImage, textPosition_ang, textPosition_ang + cv::Point(150, 0), cv::Scalar(0, 0, 0), 70);
+	    float anglefloat = *inputangbufferptr;
+	    setprecision(1);
+	    std::string anglestr = to_string(anglefloat);
+	    cv::putText(borderedImage, anglestr, textPosition_ang, cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(169, 169, 169), 2);
+	    
             
             //took j to height/2 to height in order to cut Range on RDM in half
             for (int i = 0; i < width; i++) {
@@ -290,6 +309,12 @@ class RangeDoppler : public RadarBlock
             rdm_data = reinterpret_cast<std::complex<float>*>(malloc(SIZE * sizeof(std::complex<float>)));      // allocate mem for processed complex adc data
             rdm_norm = reinterpret_cast<float*>(malloc(SIZE * sizeof(float)));                                  // allocate mem for processed magnitude adc data
             rdm_avg = reinterpret_cast<float*>(calloc(SLOW_TIME*FAST_TIME, sizeof(float)));                     // allocate mem for averaged adc data across all virtual antennas
+
+	    cfar_cube = reinterpret_cast<float*>(calloc(SLOW_TIME*FAST_TIME, sizeof(float)));
+	    angle_data = reinterpret_cast<std::complex<float>*>(calloc(96, sizeof(std::complex<float>)));
+	    angfft_data = reinterpret_cast<std::complex<float>*>(calloc(96, sizeof(std::complex<float>)));
+	    angle_norm = reinterpret_cast<float*>(malloc(96 * sizeof(float)));
+	    final_angle = reinterpret_cast<float*>(malloc(1 * sizeof(float)));
             
             // FFT SETUP PARAMETERS
             const int rank = 2;     // Determines the # of dimensions for FFT
@@ -303,7 +328,144 @@ class RangeDoppler : public RadarBlock
                                 reinterpret_cast<fftwf_complex*>(adc_data), n, istride, idist,
                                 reinterpret_cast<fftwf_complex*>(rdm_data), n, ostride, odist,
                                 FFTW_FORWARD, FFTW_ESTIMATE);      // create the FFT plan
+
+	    const int rank2 = 2;     // Determines the # of dimensions for FFT
+	    const int n2[] = {6, 16};
+	    const int howmany2 = 1;
+	    const int idist2 = 0;
+	    const int odist2 = 0;
+	    const int istride2 = 1;
+	    const int ostride2 = 1;
+	    plan2 = fftwf_plan_many_dft(rank2, n2, howmany2,
+		                reinterpret_cast<fftwf_complex*>(angle_data), n2, istride2, idist2,
+		                reinterpret_cast<fftwf_complex*>(angfft_data), n2, ostride2, odist2,
+		                FFTW_FORWARD, FFTW_ESTIMATE);      // create the FFT plan
         }
+
+
+	int compute_angle_est() {
+	    fftwf_execute(plan2);
+	    return 0;
+	}
+
+	int compute_angmag_norm(std::complex<float>* rdm_complex, float* rdm_magnitude) {
+	    float norm, log;
+	    std::complex<float> val; 
+	    for(int i=0; i<96; i++) {
+		val=rdm_complex[i];
+		norm=std::norm(val);
+		log=log2f(norm)/2.0f;
+		rdm_magnitude[i]=log;
+	    }         
+	    return 0;
+	}
+
+	
+	void find_azimuth_angle(float* angle_norm, float* final_angle) {
+	    float step = 180/16;
+	    float data[16];
+	    for(int i=0; i<16; i++) {
+		data[i] = angle_norm[48+i];
+	    }
+	    float max = *std::max_element(data, data + 16);
+	    for(int i=0; i<16; i++) {
+		if(angle_norm[48+i] == max) {
+		    final_angle[0] = -90 + step*i;
+		}
+	    }
+	}
+
+
+	float* getAngleBufferPointer()
+	{
+	    return final_angle; // find_azimuth_angle(angle_norm);
+	}
+
+
+	void fftshift_ang_est(float* arr){
+	    int midRow = 16 / 2;
+	    int midColumn = 6 / 2;
+	    float fftshifted[96];
+	    
+	    for (int i = 0; i < 16; i++) {
+		for (int j = 0; j < 6; j++) {
+		    int newRow = (i + midRow) % 16;          // ROW WISE FFTSHIFT
+		    int newColumn = (j + midColumn) % 6;    // COLUMN WISE FFTSHIFT
+		    fftshifted[newRow * 6 + j] = arr[i * 6 + j]; // only newRow is used so only row wise fftshift
+		}
+	    }
+	    for(int i = 0; i < 96; i++)
+		arr[i] = fftshifted[i];
+	}
+
+
+
+	int cfar_matrix(float* rdm_avg, float* cfar_cube) {
+
+	    float MNF = mean_noise_rdm(rdm_avg);
+	    for(int i=0; i<SLOW_TIME*FAST_TIME; i++) {
+		cfar_cube[i] = rdm_avg[i] - MNF;
+	    }
+	    float max = *std::max_element(cfar_cube, cfar_cube + SLOW_TIME*FAST_TIME);
+	    float threshold = max/2;
+	    for(int i=0; i<SLOW_TIME*FAST_TIME; i++) {
+		if (cfar_cube[i] >= threshold) {
+		    cfar_cube[i] = 1;
+		    return i;
+		}
+		else {
+		    cfar_cube[i] = 0;
+		}
+	    }
+
+	}
+
+
+	void getADCindices(int index_1D, int* indices) {
+	    const int RD_bins = SLOW_TIME*FAST_TIME;
+	    for(int i=0; i<TX*RX; i++) {
+		indices[i] = i*RD_bins + index_1D;
+	    }
+	}
+
+
+	float mean_noise_rdm(float* rdm_avg) {
+	    float MNF = 0;
+	    for(int i=0; i<SLOW_TIME*FAST_TIME; i++) {
+		MNF = MNF + rdm_avg[i];
+	    }
+	    MNF = MNF/(SLOW_TIME*FAST_TIME);
+	    return MNF;
+	}
+
+
+	void shape_angle_data(float* rdm_avg, float* cfar_cube, std::complex<float>* adc_data, std::complex<float>* angle_data) {
+
+	    int idx = cfar_matrix(rdm_avg, cfar_cube);
+	    int indices[12] = {0};
+	    getADCindices(idx, indices);
+
+	    for(int i=0; i<32; i++) {
+		angle_data[i] = 0;
+		angle_data[i+64] = 0;
+	    }
+	    for(int i=0; i<16; i++) {
+		if(i<6 || i>9) {
+		    angle_data[i+32] = 0;
+		}
+		else {
+		    angle_data[i+32] = adc_data[indices[8 + (i-6)]];
+		}
+		if(i<4 || i>11) {
+		    angle_data[i+48] = 0;
+		}
+		else {
+		    angle_data[i+48] = adc_data[indices[0 + (i-4)]];
+		}
+	    }
+
+	}
+
         // Retrieve outputbuffer pointer
         float* getBufferPointer()
         {
@@ -502,6 +664,12 @@ class RangeDoppler : public RadarBlock
             compute_range_doppler();
             compute_mag_norm(rdm_data, rdm_norm);
             averaged_rdm(rdm_norm, rdm_avg);
+	    shape_angle_data(rdm_avg, cfar_cube, adc_data, angle_data);
+	    compute_angle_est();
+	    compute_angmag_norm(angfft_data, angle_norm);
+	    //fftshift_ang_est(angle_norm);
+	    find_azimuth_angle(angle_norm, final_angle);
+	    
 
             // string str = ("./out") + to_string(frame) + ".txt";
             // save_1d_array(rdm_avg, FAST_TIME, SLOW_TIME, str);
@@ -512,9 +680,9 @@ class RangeDoppler : public RadarBlock
         }
 
         private: 
-            float *adc_data_flat, *rdm_avg, *rdm_norm, *adc_data_reshaped;
-            std::complex<float> *rdm_data, *adc_data;
-            fftwf_plan plan;
+            float *adc_data_flat, *rdm_avg, *rdm_norm, *adc_data_reshaped, *cfar_cube, *angle_norm, *final_angle;
+            std::complex<float> *rdm_data, *adc_data, *angle_data, *angfft_data;
+            fftwf_plan plan, plan2;
             uint16_t* input;
             const char *WINDOW_TYPE;
             bool SET_SNR;
