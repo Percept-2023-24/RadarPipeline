@@ -16,10 +16,12 @@ int main(int argc, char* argv[])
     uint16_t *in_bufferptr    = daq.getBufferPointer();
     float    *in_visualizeptr = rdm.getBufferPointer();
     float    *ang_visualizeptr = rdm.getAngleBufferPointer();
+    int      *angidx_visptr = rdm.getAngleIndexPointer();
     
     rdm.setBufferPointer(in_bufferptr);
     vis.setBufferPointer(in_visualizeptr);
     vis.setAngleBufferPointer(ang_visualizeptr);
+    vis.setAngleIndexPointer(angidx_visptr);
 
     // FRAME POINTER INITIATION
     auto frame_daq = daq.getFramePointer();

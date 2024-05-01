@@ -29,6 +29,7 @@ class RadarBlock
         uint* inputframeptr;
         float* inputbufferptr;
 	float* inputangbufferptr;
+	int* inputangindexptr;
 
         uint lastframe;
 
@@ -60,6 +61,11 @@ class RadarBlock
 	void setAngleBufferPointer(float* ptr)
         {
             inputangbufferptr = ptr;
+        }
+
+	void setAngleIndexPointer(int* ptr)
+        {
+            inputangindexptr = ptr;
         }
 
         // Sets the input frame pointer
@@ -154,7 +160,7 @@ class Visualizer : public RadarBlock
     float X_SCALE = 0.16;
     float Y_SCALE = 0.035;
     int stepSizeX = 64;
-    int stepSizeY = 57;
+    int stepSizeY = 57; 
     int borderSize = 60;
     int borderLeft = 220;
     int borderRight = borderLeft;
@@ -241,13 +247,19 @@ class Visualizer : public RadarBlock
                 half_offset = height/2;
 
 	    cv::Size textSize = cv::getTextSize("-           Velocity           +", cv::FONT_HERSHEY_SIMPLEX, 1.0, 4, 0);
-	    cv::Point textPosition_ang(borderLeft + 650, (borderedImage.rows-60+4*(textSize.height+24))/2);
-	    cv::line(borderedImage, textPosition_ang, textPosition_ang + cv::Point(150, 0), cv::Scalar(0, 0, 0), 70);
+	    cv::Point textPosition_slow(borderLeft + 650, (borderedImage.rows-60+4*(textSize.height+24))/2);
+	    cv::Point textPosition_fast(borderLeft + 650, (borderedImage.rows-60+6*(textSize.height+24))/2);
+	    cv::line(borderedImage, textPosition_slow - cv::Point(150, 0), textPosition_slow + cv::Point(150, 0), cv::Scalar(0, 0, 0), 100);
 	    float anglefloat = *inputangbufferptr;
+	    int cfar_slow = *inputangindexptr/FAST_TIME;
+	    int cfar_fast = *inputangindexptr%FAST_TIME;
 	    setprecision(1);
 	    std::string anglestr = to_string(anglefloat);
-	    cv::putText(borderedImage, anglestr, textPosition_ang, cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(169, 169, 169), 2);
-	    
+	    std::string slow_str = to_string(cfar_slow);
+	    std::string fast_str = to_string(cfar_fast);
+	    cv::putText(borderedImage, anglestr, textPosition_slow, cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(169, 169, 169), 2);
+	    //cv::putText(borderedImage, slow_str, textPosition_slow, cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(169, 169, 169), 2);
+	    //cv::putText(borderedImage, fast_str, textPosition_fast, cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(169, 169, 169), 2);
             
             //took j to height/2 to height in order to cut Range on RDM in half
             for (int i = 0; i < width; i++) {
@@ -259,10 +271,16 @@ class Visualizer : public RadarBlock
                     }
                 }
             }
-
-       
+	    cv::Point detection1(borderLeft + cfar_slow*px_width - px_width, borderedImage.rows - borderSize - (cfar_fast*px_height - px_height) );
+	    cv::Point detection2(borderLeft + cfar_slow*px_width, borderedImage.rows - borderSize - cfar_fast*px_height);
+	    cv::Point test1(100, 500);
+	    cv::Point test2(120, 520);
+	    cv::rectangle(borderedImage, detection1, detection2, Scalar(169,169,169), 3);
+	    //cv::circle(borderedImage, test1, 20, cv::Scalar(169,169,169));
+            //cv::Rect roi(100, 80, 120, 100);
+	    //cv::rectangle(borderedImage, roi, cv::Scalar(169,169,169));
             // cv::Rect roi(borderLeft, borderedImage.row - borderSize, px_width*width, px_height*height);
-            // cv::Mat roiImage = borderedImage(roi);
+            //cv::Mat roiImage = borderedImage(roi);
             // Convert the matrix to a color image for visualization
             applyColorMap(borderedImage, colorImage, COLORMAP_JET);
             // Display the color image
@@ -309,12 +327,16 @@ class RangeDoppler : public RadarBlock
             rdm_data = reinterpret_cast<std::complex<float>*>(malloc(SIZE * sizeof(std::complex<float>)));      // allocate mem for processed complex adc data
             rdm_norm = reinterpret_cast<float*>(malloc(SIZE * sizeof(float)));                                  // allocate mem for processed magnitude adc data
             rdm_avg = reinterpret_cast<float*>(calloc(SLOW_TIME*FAST_TIME, sizeof(float)));                     // allocate mem for averaged adc data across all virtual antennas
+	    prev_rdm_avg = reinterpret_cast<float*>(calloc(SLOW_TIME*FAST_TIME, sizeof(float))); // Previous frame allocation
+	    zero_rdm_avg = reinterpret_cast<float*>(calloc(SLOW_TIME*FAST_TIME, sizeof(float))); // rdm avg but with 0 doppler removed
 
 	    cfar_cube = reinterpret_cast<float*>(calloc(SLOW_TIME*FAST_TIME, sizeof(float)));
 	    angle_data = reinterpret_cast<std::complex<float>*>(calloc(96, sizeof(std::complex<float>)));
 	    angfft_data = reinterpret_cast<std::complex<float>*>(calloc(96, sizeof(std::complex<float>)));
 	    angle_norm = reinterpret_cast<float*>(malloc(96 * sizeof(float)));
 	    final_angle = reinterpret_cast<float*>(malloc(1 * sizeof(float)));
+	    cfar_max = reinterpret_cast<int*>(malloc(1 * sizeof(int)));
+
             
             // FFT SETUP PARAMETERS
             const int rank = 2;     // Determines the # of dimensions for FFT
@@ -340,7 +362,24 @@ class RangeDoppler : public RadarBlock
 		                reinterpret_cast<fftwf_complex*>(angle_data), n2, istride2, idist2,
 		                reinterpret_cast<fftwf_complex*>(angfft_data), n2, ostride2, odist2,
 		                FFTW_FORWARD, FFTW_ESTIMATE);      // create the FFT plan
+
+	    int frame = 1;
+	    int maxidx = 0;
         }
+
+	void remove_zero_dop(float* rdm_avg, float* zero_rdm_avg) {
+	    for(int i=0; i<SLOW_TIME*FAST_TIME; i++) {
+		zero_rdm_avg[i] = rdm_avg[i];
+            }
+	    for(int i=32; i<34; i++) {
+		for(int j=0; j<FAST_TIME; j++) {
+		    int idx = i*FAST_TIME + j;
+		    zero_rdm_avg[idx] = 0;
+                }
+            }
+
+	    //31-34 doppler frames need to be 0 out of 64, 
+	}
 
 
 	int compute_angle_est() {
@@ -370,7 +409,7 @@ class RangeDoppler : public RadarBlock
 	    float max = *std::max_element(data, data + 16);
 	    for(int i=0; i<16; i++) {
 		if(angle_norm[48+i] == max) {
-		    final_angle[0] = -90 + step*i;
+		    final_angle[0] = step*i; // add -90 if you want fft shift
 		}
 	    }
 	}
@@ -381,7 +420,12 @@ class RangeDoppler : public RadarBlock
 	    return final_angle; // find_azimuth_angle(angle_norm);
 	}
 
+	int* getAngleIndexPointer()
+	{
+	    return cfar_max; // find_azimuth_angle(angle_norm);
+	}
 
+	// Still need to fix this fftshift issue
 	void fftshift_ang_est(float* arr){
 	    int midRow = 16 / 2;
 	    int midColumn = 6 / 2;
@@ -398,8 +442,59 @@ class RangeDoppler : public RadarBlock
 		arr[i] = fftshifted[i];
 	}
 
-
-
+/*
+        void fftshift_rdm(float* arr){
+            int midRow = FAST_TIME / 2;
+            int midColumn = SLOW_TIME / 2;
+            float fftshifted[SLOW_TIME*FAST_TIME];
+           
+            for (int i = 0; i < FAST_TIME; i++) {
+                for (int j = 0; j < SLOW_TIME; j++) {
+                    int newRow = (i + midRow) % FAST_TIME;          // ROW WISE FFTSHIFT
+                    int newColumn = (j + midColumn) % SLOW_TIME;    // COLUMN WISE FFTSHIFT
+                    fftshifted[newRow * SLOW_TIME + j] = arr[i * SLOW_TIME + j]; // only newRow is used so only row wise fftshift
+                }
+            }
+            for(int i = 0; i < FAST_TIME*SLOW_TIME; i++)
+                arr[i] = fftshifted[i];
+        }
+*/
+/*
+	int cfar_matrix(float* rdm_avg, float* prev_rdm_avg, float* cfar_cube) {
+	    for(int i=0; i<SLOW_TIME*FAST_TIME; i++) {
+		cfar_cube[i] = rdm_avg[i] - prev_rdm_avg[i];
+	    }
+	    float max = *std::max_element(cfar_cube, cfar_cube + SLOW_TIME*FAST_TIME);
+	    float threshold = max;
+	    for(int i=0; i<SLOW_TIME*FAST_TIME; i++) {
+		if (cfar_cube[i] >= threshold) {
+		    cfar_cube[i] = 1;
+		    return i;
+		}
+		else {
+		    cfar_cube[i] = 0;
+		}
+	    }
+	}
+*/
+	int cfar_matrix(float* rdm_avg, float* prev_rdm_avg, float* cfar_cube) {
+	    for(int i=0; i<SLOW_TIME*FAST_TIME; i++) {
+		cfar_cube[i] = rdm_avg[i] - prev_rdm_avg[i];
+	    }
+	    float max = *std::max_element(cfar_cube, cfar_cube + SLOW_TIME*FAST_TIME);
+	    float threshold = max;
+	    for(int i=0; i<SLOW_TIME*FAST_TIME; i++) {
+		if (cfar_cube[i] >= threshold) {
+		    cfar_cube[i] = 1;
+		    return i;
+		}
+		else {
+		    cfar_cube[i] = 0;
+		}
+	    }
+	}
+	
+/*
 	int cfar_matrix(float* rdm_avg, float* cfar_cube) {
 
 	    float MNF = mean_noise_rdm(rdm_avg);
@@ -420,7 +515,7 @@ class RangeDoppler : public RadarBlock
 
 	}
 
-
+*/
 	void getADCindices(int index_1D, int* indices) {
 	    const int RD_bins = SLOW_TIME*FAST_TIME;
 	    for(int i=0; i<TX*RX; i++) {
@@ -439,11 +534,14 @@ class RangeDoppler : public RadarBlock
 	}
 
 
-	void shape_angle_data(float* rdm_avg, float* cfar_cube, std::complex<float>* adc_data, std::complex<float>* angle_data) {
+	void shape_angle_data(float* rdm_avg, float* prev_rdm_avg, float* cfar_cube, std::complex<float>* adc_data, std::complex<float>* angle_data, int* cfar_max) {
 
-	    int idx = cfar_matrix(rdm_avg, cfar_cube);
+	    cfar_max[0] = cfar_matrix(rdm_avg, prev_rdm_avg, cfar_cube);
+	    int maxidx = cfar_max[0];
+	    std::cout << "max index: " << maxidx%FAST_TIME << std::endl;
+
 	    int indices[12] = {0};
-	    getADCindices(idx, indices);
+	    getADCindices(maxidx, indices);
 
 	    for(int i=0; i<32; i++) {
 		angle_data[i] = 0;
@@ -469,7 +567,7 @@ class RangeDoppler : public RadarBlock
         // Retrieve outputbuffer pointer
         float* getBufferPointer()
         {
-            return rdm_avg;
+            return zero_rdm_avg;
         }
 
         void setBufferPointer(uint16_t* arr){
@@ -647,7 +745,7 @@ class RangeDoppler : public RadarBlock
                 }
             }
 
-            std::cout << "MAX: " << max << "      |        MIN:  " << min << std::endl;
+            //std::cout << "MAX: " << max << "      |        MIN:  " << min << std::endl;
             
             scale_rdm_values(rdm_avg, max, min);
             fftshift_rdm(rdm_avg);
@@ -660,11 +758,22 @@ class RangeDoppler : public RadarBlock
             for(int i = 0; i<SIZE_W_IQ; i++){
                 adc_data_flat[i] = (float)input[i];
             }
+	    if (frame <=1) {
+		for(int i=0; i<SLOW_TIME*FAST_TIME; i++) {
+		    prev_rdm_avg[i] = 0;
+	        }
+	    }
+	    else {
+		for(int i=0; i<SLOW_TIME*FAST_TIME; i++) {
+		    prev_rdm_avg[i] = zero_rdm_avg[i];
+	        }
+	    }
             shape_cube(adc_data_flat, adc_data_reshaped, adc_data);
             compute_range_doppler();
             compute_mag_norm(rdm_data, rdm_norm);
             averaged_rdm(rdm_norm, rdm_avg);
-	    shape_angle_data(rdm_avg, cfar_cube, adc_data, angle_data);
+	    remove_zero_dop(rdm_avg, zero_rdm_avg);
+	    shape_angle_data(zero_rdm_avg, prev_rdm_avg, cfar_cube, adc_data, angle_data, cfar_max);
 	    compute_angle_est();
 	    compute_angmag_norm(angfft_data, angle_norm);
 	    //fftshift_ang_est(angle_norm);
@@ -677,12 +786,16 @@ class RangeDoppler : public RadarBlock
             // auto stop = chrono::high_resolution_clock::now();
             // auto duration_rdm_process = duration_cast<microseconds>(stop - start);
             // std::cout << "RDM Process Time " << duration_rdm_process.count() << " microseconds" << std::endl;
+	    
+	    frame ++;
+	    std::cout << "Frame: " << frame << std::endl;
         }
 
         private: 
-            float *adc_data_flat, *rdm_avg, *rdm_norm, *adc_data_reshaped, *cfar_cube, *angle_norm, *final_angle;
+            float *adc_data_flat, *rdm_avg, *rdm_norm, *adc_data_reshaped, *cfar_cube, *angle_norm, *final_angle, *prev_rdm_avg, *zero_rdm_avg;
             std::complex<float> *rdm_data, *adc_data, *angle_data, *angfft_data;
             fftwf_plan plan, plan2;
+	    int *cfar_max;
             uint16_t* input;
             const char *WINDOW_TYPE;
             bool SET_SNR;
